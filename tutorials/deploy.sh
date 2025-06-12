@@ -934,9 +934,9 @@ main() {
     fi
 
     # 단계별 실행
-    # check_prerequisites
-    # validate_template
-    # deploy_stack
+    check_prerequisites
+    validate_template
+    deploy_stack
     collect_outputs
     create_sample_files
     create_job_submission_script
