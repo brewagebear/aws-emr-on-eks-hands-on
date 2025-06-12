@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: irsa-test-sa
+  namespace: emr
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::354076467713:role/spark-on-eks-hands-on-emr-execution-role

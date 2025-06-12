@@ -1,0 +1,392 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Cost-effective EMR Spark on EKS with MWAA and Log Aggregation'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'spark-on-eks-hands-on'
+
+  VpcCidr:
+    Type: String
+    Default: '10.0.0.0/16'
+
+  EKSVersion:
+    Type: String
+    Default: '1.28'
+
+Resources:
+  # VPC 구성 (최소 비용)
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpc'
+
+  # 인터넷 게이트웨이
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-igw'
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  # 퍼블릭 서브넷 (2개 - 최소 요구사항)
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-subnet-1'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-subnet-2'
+
+  # 프라이빗 서브넷 (2개)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.10.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-subnet-1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.11.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-subnet-2'
+
+  # 라우팅 테이블
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-routes'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  # NAT Gateway (단일 - 비용 절약)
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-routes-1'
+
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet2
+
+  # S3 버킷들 (MWAA 버킷 제거)
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-data-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-logs-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  # EKS 클러스터 IAM 역할
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  # EKS 클러스터
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Sub '${ProjectName}-cluster'
+      Version: !Ref EKSVersion
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+        EndpointPrivateAccess: false
+        EndpointPublicAccess: true
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+            - Type: controllerManager
+            - Type: scheduler
+
+  # EKS 노드 그룹 IAM 역할
+  EKSNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: EMRNodePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:aws:s3:::spark-on-eks-demo-data'
+                  - !Sub 'arn:aws:s3:::spark-on-eks-demo-data/*'
+                  - !Sub 'arn:aws:s3:::spark-on-eks-demo-logs'
+                  - !Sub 'arn:aws:s3:::spark-on-eks-demo-logs/*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: '*'
+
+  # EKS 노드 그룹 (Spot 인스턴스 사용 - 비용 절약)
+  EKSNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn: EKSCluster
+    Properties:
+      ClusterName: !Ref EKSCluster
+      NodegroupName: !Sub '${ProjectName}-nodegroup'
+      NodeRole: !GetAtt EKSNodeRole.Arn
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      InstanceTypes:
+        - t3.medium
+      CapacityType: SPOT
+      ScalingConfig:
+        MinSize: 1
+        MaxSize: 3
+        DesiredSize: 2
+      UpdateConfig:
+        MaxUnavailablePercentage: 25
+
+  # EMR Virtual Cluster를 위한 IAM 역할
+  EMRExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-emr-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - emr-containers.amazonaws.com
+            Action:
+              - sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: EMRExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DataBucket}'
+                  - !Sub 'arn:aws:s3:::${DataBucket}/*'
+                  - !Sub 'arn:aws:s3:::${LogsBucket}'
+                  - !Sub 'arn:aws:s3:::${LogsBucket}/*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - emr-containers:StartJobRun
+                  - emr-containers:DescribeJobRun
+                  - emr-containers:CancelJobRun
+                  - emr-containers:ListJobRuns
+                  - emr-containers:TagResource
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey*
+                  - kms:Encrypt
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                  - eks:AccessKubernetesApi
+                Resource: '*'
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${ProjectName}-vpc-id'
+
+  EKSClusterName:
+    Description: EKS Cluster Name
+    Value: !Ref EKSCluster
+    Export:
+      Name: !Sub '${ProjectName}-cluster-name'
+
+  EKSClusterEndpoint:
+    Description: EKS Cluster Endpoint
+    Value: !GetAtt EKSCluster.Endpoint
+    Export:
+      Name: !Sub '${ProjectName}-cluster-endpoint'
+
+  DataBucketName:
+    Description: Data S3 Bucket Name
+    Value: !Ref DataBucket
+    Export:
+      Name: !Sub '${ProjectName}-data-bucket'
+
+  LogsBucketName:
+    Description: Logs S3 Bucket Name
+    Value: !Ref LogsBucket
+    Export:
+      Name: !Sub '${ProjectName}-logs-bucket'
+
+  EMRExecutionRoleArn:
+    Description: EMR Execution Role ARN
+    Value: !GetAtt EMRExecutionRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-emr-execution-role-arn'
