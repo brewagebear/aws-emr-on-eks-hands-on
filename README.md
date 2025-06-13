@@ -320,6 +320,23 @@ eksctl utils associate-iam-oidc-provider \
   --approve
 ```
 
+- spark-on-eks-hands-on-emr-execution-role / Trusht relationship 설정
+
+```sh
+{
+            "Effect": "Allow",
+            "Principal": {
+                "Federated": "arn:aws:iam::{ACCOUNT_ID}:oidc-provider/oidc.eks.ap-northeast-2.amazonaws.com/id/{OCID_ID}"
+            },
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Condition": {
+                "StringEquals": {
+                    "oidc.eks.ap-northeast-2.amazonaws.com/id/{OCID_ID}:aud": "sts.amazonaws.com"
+                }
+            }
+        }
+```
+
 ```sh
 kubectl run irsa-test --rm -it --restart=Never -n emr \
   --image=amazonlinux:2 \
